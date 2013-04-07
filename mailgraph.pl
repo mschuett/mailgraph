@@ -5,6 +5,8 @@
 # copyright (c) 2000-2007 David Schweikert <david@schweikert.ch>
 # released under the GNU General Public License
 
+# modified to include reject reasons by Martin Schuette <info@mschuette.name>
+
 ## EMBED(/home/dws/checkouts/dws/sw/Parse-Syslog/lib/Parse/Syslog.pm)
 
 #####################################################################
@@ -19,7 +21,7 @@ use Getopt::Long;
 use POSIX 'setsid';
 use Parse::Syslog;
 
-my $VERSION = "1.11";
+my $VERSION = "1.14mod";
 
 # config
 my $rrdstep = 60;
@@ -34,9 +36,13 @@ my $daemon_rrd_dir = '/var/log';
 my $logfile;
 my $rrd = "mailgraph.rrd";
 my $rrd_virus = "mailgraph_virus.rrd";
+my $rrd_rejects = "mailgraph_rejects.rrd";
 my $year;
 my $this_minute;
-my %sum = ( sent => 0, received => 0, bounced => 0, rejected => 0, virus => 0, spam => 0 );
+my %sum = ( sent => 0, received => 0, bounced => 0, rejected => 0, virus => 0,
+	spam => 0, rej_greylisted => 0, rej_greyblocked => 0, rej_helo => 0,
+	rej_policydw => 0, rej_dnsbl => 0, rej_userunknown => 0, rej_sender => 0,
+	rej_norelay => 0, rej_other => 0 );
 my $rrd_inited=0;
 
 my %opt = ();
@@ -217,6 +223,33 @@ sub init_rrd($)
 		$this_minute = RRDs::last($rrd_virus) + $rrdstep;
 	}
 
+  # rejects rrd
+  if(! -f $rrd_rejects and ! $opt{'only-virus-rrd'}) {
+          RRDs::create($rrd_rejects, '--start', $m, '--step', $rrdstep,
+                          'DS:rej_greylisted:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_greyblocked:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_helo:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_policydw:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_dnsbl:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_userunknown:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_sender:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_norelay:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          'DS:rej_other:ABSOLUTE:'.($rrdstep*2).':0:U',
+                          "RRA:AVERAGE:0.5:$day_steps:$realrows",   # day
+                          "RRA:AVERAGE:0.5:$week_steps:$realrows",  # week
+                          "RRA:AVERAGE:0.5:$month_steps:$realrows", # month
+                          "RRA:AVERAGE:0.5:$year_steps:$realrows",  # year
+                          "RRA:MAX:0.5:$day_steps:$realrows",   # day
+                          "RRA:MAX:0.5:$week_steps:$realrows",  # week
+                          "RRA:MAX:0.5:$month_steps:$realrows", # month
+                          "RRA:MAX:0.5:$year_steps:$realrows",  # year
+                          );
+  }
+  elsif(-f $rrd_rejects and ! defined $rrd_rejects) {
+          $this_minute = RRDs::last($rrd_rejects) + $rrdstep;
+  }
+
+
 	$rrd_inited=1;
 }
 
@@ -267,6 +300,42 @@ sub process_line($)
 			}
 			elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: /) {
 				event($time, 'rejected');
+        if($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Helo command rejected: /o) {
+                event($time, 'rej_helo');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Recipient address rejected: Mail appeared to be SPAM or forged\./o) {
+                event($time, 'rej_policydw');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Recipient address rejected: Diese Mailingliste wurde geloescht\.( Bei)? Nachfragen dazu bitte /o) {
+                event($time, 'rej_userunknown');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: (Recipient address rejected: Your MTA is listed in too many DNSBLs|554 Service unavailable; Client host \[.*\] blocked using )/o) {
+                event($time, 'rej_dnsbl');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Recipient address rejected: Greylisted, see http:\/\/postgrey\.schweikert\.ch\/help\//o) {
+                event($time, 'rej_greylisted');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Recipient address rejected: temporarily blocked because of previous errors - /o) {
+                event($time, 'rej_greyblocked');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Recipient address rejected:.* User unknown /o) {
+                event($time, 'rej_userunknown');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Sender address rejected: /o) {
+                event($time, 'rej_sender');
+        }
+        elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?reject: RCPT from .*: Relay access denied; /o) {
+                event($time, 'rej_norelay');
+        }
+				elsif($text =~ /^(NOQUEUE: )?reject: RCPT from.*: 450 4\.7\.1 Client host rejected: cannot find your hostname/o) {
+								# rej_other because not yet in RRD
+								event($time, 'rej_other');
+				}
+        else {
+								# not recognized
+								print "unrecognized log line: $text\n" if $opt{verbose};
+                event($time, 'rej_other');
+        }
 			}
 			elsif($text =~ /^(?:[0-9A-Z]+: |NOQUEUE: )?milter-reject: /) {
 				if($text =~ /Blocked by SpamAssassin/) {
@@ -351,6 +420,7 @@ sub process_line($)
 				event($time, 'spam');
 			} else {
 				event($time, 'rejected');
+        event($time, 'rej_dnsbl');
 			}
 		}
 		elsif($text =~ / rejected RCPT \S+: (Sender verify failed|Unknown user)/) {
@@ -526,11 +596,13 @@ sub update($)
 	print "update $this_minute:$sum{sent}:$sum{received}:$sum{bounced}:$sum{rejected}:$sum{virus}:$sum{spam}\n" if $opt{verbose};
 	RRDs::update $rrd, "$this_minute:$sum{sent}:$sum{received}:$sum{bounced}:$sum{rejected}" unless $opt{'only-virus-rrd'};
 	RRDs::update $rrd_virus, "$this_minute:$sum{virus}:$sum{spam}" unless $opt{'only-mail-rrd'};
+	RRDs::update $rrd_rejects, "$this_minute:$sum{rej_greylisted}:$sum{rej_greyblocked}:$sum{rej_helo}:$sum{rej_policydw}:$sum{rej_dnsbl}:$sum{rej_userunknown}:$sum{rej_sender}:$sum{rej_norelay}:$sum{rej_other}" unless $opt{'only-virus-rrd'};
 	if($m > $this_minute+$rrdstep) {
 		for(my $sm=$this_minute+$rrdstep;$sm<$m;$sm+=$rrdstep) {
 			print "update $sm:0:0:0:0:0:0 (SKIP)\n" if $opt{verbose};
 			RRDs::update $rrd, "$sm:0:0:0:0" unless $opt{'only-virus-rrd'};
 			RRDs::update $rrd_virus, "$sm:0:0" unless $opt{'only-mail-rrd'};
+			RRDs::update $rrd_rejects, "$sm:0:0:0:0:0:0:0:0:0" unless $opt{'only-virus-rrd'};
 		}
 	}
 	$this_minute = $m;
@@ -540,6 +612,15 @@ sub update($)
 	$sum{rejected}=0;
 	$sum{virus}=0;
 	$sum{spam}=0;
+	$sum{rej_greylisted}=0;
+	$sum{rej_greyblocked}=0;
+	$sum{rej_helo}=0;
+	$sum{rej_policydw}=0;
+	$sum{rej_dnsbl}=0;
+	$sum{rej_userunknown}=0;
+	$sum{rej_sender}=0;
+	$sum{rej_norelay}=0;
+	$sum{rej_other}=0;
 	return 1;
 }
 
