@@ -1,4 +1,4 @@
-# H1 My mailgraph patch
+# My mailgraph patch
 
 This is a small [mailgraph patch](http://mschuette.name/files/mailgraph-1.14-rejectreasons.diff) I maintain for some time now.
 It adds regexps and counters for different reject reasons.
